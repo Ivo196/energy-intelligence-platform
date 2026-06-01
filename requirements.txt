@@ -1,0 +1,35 @@
+# Core
+numpy
+pandas
+pyarrow
+
+# HTTP / APIs
+requests
+requests-cache
+retry-requests
+lxml
+fastapi
+uvicorn
+
+# Scheduling
+apscheduler
+
+# Weather
+openmeteo-requests
+
+# Utils
+python-dotenv
+holidays
+pytest
+evidently
+
+# Visualization
+matplotlib
+plotly
+streamlit
+
+# Models
+scikit-learn
+xgboost
+lightgbm
+joblib

@@ -1,0 +1,78 @@
+name: Historical Pipeline (current year)
+
+on:
+  schedule:
+    - cron: "0 3 * * *" # every day at 3 AM UTC
+  workflow_dispatch: # manual trigger
+
+jobs:
+  run-historical-pipeline:
+    runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements_pipeline.txt
+
+      - name: Download previous year preprocessed data from HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          from huggingface_hub import HfApi
+          import pandas as pd
+
+          api = HfApi(token="${{ secrets.HF_TOKEN }}")
+          repo_id = "bachirij/energy-intelligence-platform"
+          current_year = pd.Timestamp.now().year
+
+          # Required by build_features.py to bootstrap load_t-168 at year boundary
+          api.hf_hub_download(
+              repo_id=repo_id,
+              repo_type="space",
+              filename=f"data/processed/country=FR/year={current_year - 1}/load_weather.parquet",
+              local_dir=".",
+          )
+          EOF
+
+      - name: Run historical pipeline for current year
+        env:
+          ENTSOE_API_TOKEN: ${{ secrets.ENTSOE_API_TOKEN }}
+        run: |
+          CURRENT_YEAR=$(python -c "import pandas as pd; print(pd.Timestamp.now().year)")
+          python main.py --steps ingest preprocess features \
+            --start-year $CURRENT_YEAR --end-year $CURRENT_YEAR
+
+      - name: Upload updated featured parquet to HF
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python - <<'EOF'
+          from huggingface_hub import HfApi
+          from pathlib import Path
+          import pandas as pd
+
+          api = HfApi(token="${{ secrets.HF_TOKEN }}")
+          repo_id = "bachirij/energy-intelligence-platform"
+          repo_type = "space"
+          current_year = pd.Timestamp.now().year
+
+          parquet_path = Path(f"data/featured/country=FR/year={current_year}/load_forecasting_features.parquet")
+
+          api.upload_file(
+              path_or_fileobj=str(parquet_path),
+              path_in_repo=f"data/featured/country=FR/year={current_year}/{parquet_path.name}",
+              repo_id=repo_id,
+              repo_type=repo_type,
+          )
+          print(f"Uploaded featured {current_year}. Done.")
+          EOF

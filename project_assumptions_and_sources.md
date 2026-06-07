@@ -20,6 +20,7 @@ This document describes the data sources, modeling assumptions, and known limita
 - [Unit Tests](#10-unit-tests)
 - [MLOps — Drift Monitoring](#11-mlops--drift-monitoring)
 - [Dashboard - Streamlit](#12-dashboard---streamlit)
+- [Deployment — Hugging Face Spaces](#13-deployment--hugging-face-spaces)
 
 ---
 
@@ -165,6 +166,20 @@ French public holidays are computed using the `holidays` Python library (`holida
 
 Holiday detection is applied on timestamps converted to `Europe/Paris` local time to avoid off-by-one errors at UTC midnight (e.g. December 31 at 23:00 UTC = January 1 local time).
 
+### 5.4 Year-boundary bootstrap for lag features
+
+When `build_load_forecasting_features` is called for a single year (e.g. `years=[2026]`),
+the first 168 rows lack a valid `load_t-168` value because the previous year's data is
+not loaded. Without correction, `dropna()` removes the first 7 days of the year.
+
+**Fix**: before computing features, the last 168h of the previous year's preprocessed
+file (`data/processed/country=FR/year=N-1/load_weather.parquet`) are prepended to the
+current year's dataframe as lag context. These rows are naturally excluded from the
+output because the final `groupby(datetime.dt.year)` saves only rows belonging to year N.
+
+This fix recovers all days lost to the lag boundary at year start. The only irreducible
+gap is January 1st when ENTSO-E does not publish data for that date (public holiday).
+
 ---
 
 ## 6. Real-Time Pipeline Assumptions
@@ -185,18 +200,19 @@ The real-time parquet file maintains a **7-day rolling window** of data. Rows ol
 
 ## 7. Known Limitations & Future Improvements
 
-| Limitation                                           | Impact                                                                                                                                                                                                    | Planned fix                                                                   |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| Single weather station (Paris)                       | May underestimate regional demand drivers                                                                                                                                                                 | Population-weighted multi-city average                                        |
-| No cloud deployment yet                              | Pipeline runs locally only                                                                                                                                                                                | Deploy on Hugging Face Spaces/AWS/GCP with scheduled ingestion                |
-| No model monitoring                                  | Model drift is not detected                                                                                                                                                                               | Add data drift and prediction drift monitoring (Evidently)                    |
-| COVID-19 anomaly not flagged                         | 2020–2021 data may distort seasonal patterns                                                                                                                                                              | Add `is_lockdown` binary feature or exclude from training                     |
-| No uncertainty quantification                        | Point forecast only                                                                                                                                                                                       | Add prediction intervals (quantile regression or conformal prediction)        |
-| Tests not yet implemented                            | Code reliability not guaranteed                                                                                                                                                                           | Add unit tests for ingestion, preprocessing, and feature engineering          |
-| Val 2024 unrepresentative for model selection        | 2024 was an abnormally warm year (mean load: 48,904 MW), biasing model selection toward low-consumption conditions and penalising generalisation on higher-consumption periods                            | Use temporal cross-validation across multiple years for model selection       |
-| Test set 2025 partially out of distribution          | Spring–autumn 2025 consumption levels (47,000–55,000 MW) were underrepresented in training; MAE of 5,606 MW is a pessimistic upper bound driven by Apr–Nov, not representative of operational performance | Evaluate on a climatically neutral year or report MAE by season               |
-| ENTSO-E API returns data beyond requested period_end | For year 2025, the API returned data up to 2028 (forecasts/planned values), inflating the raw dataset to 26,000+ rows                                                                                     | Explicit year filter applied post-fetch: `df[df["datetime"].dt.year == year]` |
-| ENTSO-E sub-hourly points during DST transitions     | Raw data occasionally contains 15-min and 45-min interval points around daylight saving time changes, causing incorrect row counts                                                                        | Resample to strict 1h frequency using mean aggregation after fetching         |
+| Limitation                                                 | Impact                                                                                                                                                                                                           | Planned fix                                                                                                                                                |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Single weather station (Paris)                             | May underestimate regional demand drivers                                                                                                                                                                        | Population-weighted multi-city average                                                                                                                     |
+| Static data snapshot on HF Spaces                          | Dashboard displays data from the last local pipeline run; does not auto-refresh                                                                                                                                  | Re-run pipeline locally and re-upload with `upload_to_hf.py`                                                                                               |
+| No model monitoring                                        | Model drift is not detected                                                                                                                                                                                      | Add data drift and prediction drift monitoring (Evidently)                                                                                                 |
+| COVID-19 anomaly not flagged                               | 2020–2021 data may distort seasonal patterns                                                                                                                                                                     | Add `is_lockdown` binary feature or exclude from training                                                                                                  |
+| No uncertainty quantification                              | Point forecast only                                                                                                                                                                                              | Add prediction intervals (quantile regression or conformal prediction)                                                                                     |
+| Tests not yet implemented                                  | Code reliability not guaranteed                                                                                                                                                                                  | Add unit tests for ingestion, preprocessing, and feature engineering                                                                                       |
+| Val 2024 unrepresentative for model selection              | 2024 was an abnormally warm year (mean load: 48,904 MW), biasing model selection toward low-consumption conditions and penalising generalisation on higher-consumption periods                                   | Use temporal cross-validation across multiple years for model selection                                                                                    |
+| Test set 2025 partially out of distribution                | Spring–autumn 2025 consumption levels (47,000–55,000 MW) were underrepresented in training; MAE of 5,606 MW is a pessimistic upper bound driven by Apr–Nov, not representative of operational performance        | Evaluate on a climatically neutral year or report MAE by season                                                                                            |
+| ENTSO-E API returns data beyond requested period_end       | For year 2025, the API returned data up to 2028 (forecasts/planned values), inflating the raw dataset to 26,000+ rows                                                                                            | Explicit year filter applied post-fetch: `df[df["datetime"].dt.year == year]`                                                                              |
+| ENTSO-E sub-hourly points during DST transitions           | Raw data occasionally contains 15-min and 45-min interval points around daylight saving time changes, causing incorrect row counts                                                                               | Resample to strict 1h frequency using mean aggregation after fetching                                                                                      |
+| 2026 featured data starts on January 2nd (not January 1st) | ENTSO-E does not publish data for January 1st (public holiday). The `load_t-168` lag then consumes the first 7 available days, so the featured data effectively starts on January 9th without the bootstrap fix. | Fixed: `build_load_forecasting_features` now bootstraps lag context from the last 168h of the previous year's preprocessed data before computing features. |
 
 ---
 
@@ -799,3 +815,255 @@ All axis-specific overrides (tick format, title, range) are applied separately v
 | `temperature_t-24` is NaN in realtime (fallback to `temperature_t`)         | Documented, negligible impact   | Acceptable given 0.1% feature importance                          |
 | `use_container_width=True` deprecated (Streamlit ≥ 2.x)                     | Warning in logs                 | Replace with `width='stretch'`                                    |
 | Feature reconstruction duplicated between `api/main.py` and `prediction.py` | Documented                      | Refactor into `src/modeling/inference.py`                         |
+
+---
+
+## 13. Deployment — Hugging Face Spaces
+
+### 13.1 Architecture and Deployment Philosophy
+
+The dashboard is deployed as a **static snapshot** on Hugging Face Spaces. The pipeline continues to run locally; data is uploaded manually after each run.
+
+**What is deliberately not deployed:**
+
+- No cloud scheduler (Railway, Render…): requires a major refactoring of the storage layer, and data freshness is not what a recruiter evaluates.
+- No shared cloud storage (Cloudflare R2, S3…): pointless without a continuously running scheduler.
+- No multi-service architecture: one Space, one URL, zero external dependency.
+
+**Known limitation (documented, not hidden):**
+The data displayed is a static snapshot from the last local pipeline run. It does not update automatically. To refresh, re-run the pipeline locally and re-upload via `upload_to_hf.py`.
+
+**Space URL:**
+
+```
+https://huggingface.co/spaces/bachirij/energy-intelligence-platform
+```
+
+---
+
+### 13.2 Why Docker SDK (not native Streamlit SDK)
+
+The native Streamlit SDK on HF Spaces conflicts with the project's `src/` layout. The `src/` package and its relative imports cause `ModuleNotFoundError` at runtime when Streamlit tries to resolve them in the default SDK environment. The Docker SDK provides a fully controlled environment identical to local execution.
+
+---
+
+### 13.3 Deployment Files
+
+Three files are created at the project root. No existing project files are modified.
+
+| File               | Location     | Role                         | Goes to HF? |
+| ------------------ | ------------ | ---------------------------- | ----------- |
+| `Dockerfile`       | project root | Docker build instructions    | Yes         |
+| `app.py`           | project root | Streamlit entry point for HF | Yes         |
+| `requirements.txt` | project root | Dashboard-only dependencies  | Yes         |
+| `upload_to_hf.py`  | project root | Local upload script          | No          |
+
+**`Dockerfile`**
+
+```dockerfile
+FROM python:3.12-slim
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY . .
+
+EXPOSE 7860
+
+CMD ["streamlit", "run", "app.py", "--server.port=7860", "--server.address=0.0.0.0"]
+```
+
+Port `7860` is mandatory on HF Spaces; any other port prevents public exposure of the app.
+
+**`app.py`**
+
+```python
+import runpy
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent
+sys.path.insert(0, str(root))
+sys.path.insert(0, str(root / "dashboard"))
+
+runpy.run_path(
+    str(root / "dashboard" / "dashboard.py"),
+    run_name="__main__",
+)
+```
+
+Two `sys.path.insert` calls are required:
+
+- `root` makes `src/` importable (e.g. `from src.modeling.config import FEATURE_COLS`).
+- `root / "dashboard"` makes `tabs/` and `utils/` importable from within `dashboard.py`. Without this second insert, a `ModuleNotFoundError: No module named 'tabs'` is raised at runtime.
+
+`runpy.run_path` is used instead of a direct import so that `st.set_page_config()` and other Streamlit configuration commands that must appear at the top of the entry file behave correctly.
+
+**`requirements.txt`**
+
+Only dashboard-level dependencies are listed (no ingestion or training dependencies), to keep the Docker image light and the build fast:
+
+```
+streamlit
+pandas
+plotly
+joblib
+xgboost
+lightgbm
+scikit-learn
+holidays
+pyarrow
+evidently
+```
+
+---
+
+### 13.4 README.md Configuration on HF Spaces
+
+After Space creation, HF auto-generates a `README.md` with incorrect metadata. The entire content must be replaced with:
+
+```yaml
+---
+title: Energy Intelligence Platform
+emoji: ⚡
+colorFrom: red
+colorTo: red
+sdk: docker
+app_port: 7860
+pinned: false
+short_description: Hourly electricity demand forecasting platform for France
+---
+```
+
+**Critical fields:**
+
+- `sdk: docker` — must match the SDK chosen at Space creation.
+- `app_port: 7860` — the default template sets `8501` (native Streamlit port), which breaks Docker deployment. This field must be set to `7860`.
+
+---
+
+### 13.5 Upload Script (`upload_to_hf.py`)
+
+The script uses `HfApi.upload_folder` and `HfApi.upload_file` from `huggingface_hub`. It uploads: source code (`dashboard/`, `src/`), root files (`app.py`, `requirements.txt`, `Dockerfile`), model artifacts (`models/`), the realtime parquet snapshot, historical featured parquets for years 2024–2026, and the latest monitoring report.
+
+Binary files (`.parquet`, `.pkl`) cannot be `COPY`'d in the Dockerfile during the HF Spaces build; `HfApi.upload_folder` / `upload_file` is the correct pattern to get them into the Space.
+
+`UserWarning` messages about committing data files to a Space are expected and harmless. HF rebuilds the Space automatically after the last commit.
+
+---
+
+### 13.6 FastAPI Layer
+
+`api/main.py` is not deployed. The dashboard reads parquets and the model directly from disk inside the container. The API layer remains in the repository as a portfolio artifact demonstrating REST serving knowledge, but it is not part of the live deployment.
+
+---
+
+### 13.7 Updating the Dashboard
+
+Realtime data is updated automatically every hour via a GitHub Actions workflow
+(`.github/workflows/realtime_pipeline.yml`). The workflow:
+
+1. Checks out the repository
+2. Downloads `data/featured/country=FR/year=2024/` and `models/best_model.pkl` from HF
+   (required by the drift monitoring step)
+3. Runs `python main.py --steps realtime`
+4. Uploads the updated `data/realtime/country=FR/realtime.parquet` and latest
+   `data/monitoring/YYYY-MM-DD_HH.json` back to HF
+
+HF rebuilds the Space automatically after each push. The dashboard reflects new data
+within ~1–2 minutes.
+
+**Secrets required in GitHub repository settings:**
+
+| Secret             | Value                               |
+| ------------------ | ----------------------------------- |
+| `ENTSOE_API_TOKEN` | ENTSO-E API token                   |
+| `HF_TOKEN`         | Hugging Face write-permission token |
+
+**Manual refresh (realtime only):**
+
+```bash
+python main.py --steps realtime
+python upload_to_hf.py
+```
+
+**Manual refresh (historical year):**
+
+```bash
+python main.py --steps ingest preprocess features --start-year 2026 --end-year 2026
+python upload_to_hf.py
+```
+
+Historical data for the current year (2026) is updated automatically every day at 3 AM UTC
+via a second GitHub Actions workflow (`.github/workflows/historical_pipeline.yml`). The
+workflow:
+
+1. Downloads `data/processed/country=FR/year=2025/load_weather.parquet` from HF (required
+   by the year-boundary bootstrap in `build_load_forecasting_features`)
+2. Runs `python main.py --steps ingest preprocess features` for the current year
+3. Uploads the updated featured parquet back to HF
+
+---
+
+### 13.8 Common Errors
+
+| Error in logs                                 | Likely cause                                  | Fix                                                           |
+| --------------------------------------------- | --------------------------------------------- | ------------------------------------------------------------- |
+| `ModuleNotFoundError: No module named 'tabs'` | `dashboard/` not in `sys.path`                | Add `sys.path.insert(0, str(root / "dashboard"))` in `app.py` |
+| `ModuleNotFoundError: No module named 'X'`    | Missing dependency                            | Add to `requirements.txt` and re-upload                       |
+| `FileNotFoundError: data/realtime/...`        | Parquet not uploaded or wrong path            | Re-run `upload_to_hf.py`                                      |
+| App stuck on default Streamlit template       | Wrong `app_port` in `README.md`               | Set `app_port: 7860` in Space `README.md`                     |
+| Space stuck on "Building" for >10 min         | Heavy dependency compiling (LightGBM/XGBoost) | Normal on first build; wait                                   |
+
+---
+
+### 13.9 GitHub Actions — Realtime Pipeline
+
+**File**: `.github/workflows/realtime_pipeline.yml`
+
+**Trigger**: every hour (`cron: "0 * * * *"`) + manual dispatch (`workflow_dispatch`)
+
+**Pipeline file**: `requirements_pipeline.txt` at the project root lists pipeline-only
+dependencies (ingestion, monitoring, huggingface_hub) separately from `requirements.txt`
+(dashboard only). This keeps the GitHub Actions runner install fast and independent of
+the dashboard.
+
+**Why download reference data from HF instead of storing it in Git?**
+The featured parquets and model pickle are binary files that change over time. Storing
+them in Git would bloat the repository history. Downloading them from the Space at
+workflow runtime ensures the runner always uses the same artifacts that are live in
+production.
+
+**Node.js deprecation warning**: `actions/checkout@v4` and `actions/setup-python@v5`
+currently run on Node.js 20, which will be removed from GitHub runners on September 16th, 2026. Fix before that date by adding to the job:
+
+```yaml
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+```
+
+---
+
+### 13.10 GitHub Actions — Historical Pipeline (current year)
+
+**File**: `.github/workflows/historical_pipeline.yml`
+
+**Trigger**: every day at 3 AM UTC (`cron: "0 3 * * *"`) + manual dispatch
+
+**Why daily and not hourly?**
+The full historical pipeline (ingest → preprocess → features) is significantly heavier
+than the realtime pipeline. Running it hourly would be wasteful — historical data for the
+current year changes incrementally and a daily refresh is sufficient for the dashboard.
+
+**Why download `processed/year=2025` from HF?**
+The GitHub Actions runner has no local data. The year-boundary bootstrap in
+`build_load_forecasting_features` (§5.4) requires the last 168h of the previous year's
+preprocessed data to compute `load_t-168` for the first days of the current year. This
+file is downloaded from HF at workflow runtime rather than stored in Git to keep the
+repository free of binary files.
+
+**Dynamic year handling**: the current year is computed at runtime via
+`pd.Timestamp.now().year`, making the workflow automatically valid in 2027 and beyond
+without any modification.

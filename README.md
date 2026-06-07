@@ -2,6 +2,8 @@
 
 > End-to-end machine learning system for hourly electricity demand forecasting in France: from raw API data to a live interactive dashboard.
 
+**Live demo:** [huggingface.co/spaces/bachirij/energy-intelligence-platform](https://huggingface.co/spaces/bachirij/energy-intelligence-platform)
+
 ---
 
 ## Overview
@@ -104,14 +106,13 @@ energy-intelligence-platform/
 │   ├── test_api.py
 │   └── test_monitor.py
 │
-├── docs/
-│   └── project_assumptions_and_sources.md
-│
 ├── notebooks/
 ├── main.py                              # Pipeline orchestrator (--steps flag)
 ├── scheduler.py                         # APScheduler: hourly real-time updates
+├── app.py                               # Streamlit entry point for HF Spaces
 ├── Dockerfile
 ├── requirements.txt
+├── project_assumptions_and_sources.md   # Project assumptions and sources
 └── .env                                 # API credentials (not committed, but .env.example provided)
 ```
 
@@ -130,7 +131,7 @@ energy-intelligence-platform/
 **1. Clone the repository**
 
 ```bash
-git clone https://github.com/your-username/energy-intelligence-platform.git
+git clone https://github.com/bachirij/energy-intelligence-platform.git
 cd energy-intelligence-platform
 ```
 
@@ -275,7 +276,7 @@ Models are trained on French electricity data from 2015 to 2025 using a strict t
 
 XGBoost is the best model and is used for all inference.
 
-> **Note on test set (2025):** Test MAE is significantly higher than validation MAE due to out-of-distribution conditions: exceptional cold in winter 2025 and unexpectedly low consumption in spring/autumn. This is a documented distribution shift, not a model defect. See `docs/project_assumptions_and_sources.md §4` for details.
+> **Note on test set (2025):** Test MAE is significantly higher than validation MAE due to out-of-distribution conditions: exceptional cold in winter 2025 and unexpectedly low consumption in spring/autumn. This is a documented distribution shift, not a model defect. See `/project_assumptions_and_sources.md §8.7` for details.
 
 **Input features:**
 
@@ -300,11 +301,11 @@ Feature importance (XGBoost): `load_t` (52.8%) + `load_t-1` (38.9%) = **91.7%** 
 
 At each real-time ingestion cycle, the monitor compares the current 24h snapshot against the 2024 reference distribution using Evidently's KS test (threshold p < 0.05).
 
-Eight features are monitored: the four load lags, `hour`, `day_of_week`, `is_weekday`, `week_of_year`. Temperature features are excluded, the real-time snapshot contains only ~2 hours of weather forecast, making temperature monitoring statistically meaningless.
+Eight features are monitored: the four load lags, `hour`, `day_of_week`, `is_weekday`, `week_of_year`. Temperature features are excluded; the real-time snapshot contains only ~2 hours of weather forecast, making temperature monitoring statistically meaningless.
 
 Results are saved as timestamped JSON reports in `data/monitoring/` and surfaced in the dashboard's **Model Performance** tab.
 
-> **Known artefact:** `hour` is structurally flagged as drifted (p ≈ 0.0) because the 24-row snapshot has a perfectly uniform hour distribution, while the 2024 reference is non-uniform. This is a false positive, documented in `docs/project_assumptions_and_sources.md §11.7`.
+> **Known artefact:** `hour` is structurally flagged as drifted (p ≈ 0.0) because the 24-row snapshot has a perfectly uniform hour distribution, while the 2024 reference is non-uniform. This is a false positive, documented in `/project_assumptions_and_sources.md §11.7`.
 
 ---
 
@@ -315,6 +316,27 @@ pytest tests/ -v
 ```
 
 27 tests, all passing (~2 seconds). Coverage: real-time ingestion, preprocessing, feature engineering, API endpoints, and drift monitoring.
+
+---
+
+## Deployment
+
+The dashboard is deployed on **Hugging Face Spaces** (Docker SDK) and publicly accessible at:
+
+**[huggingface.co/spaces/bachirij/energy-intelligence-platform](https://huggingface.co/spaces/bachirij/energy-intelligence-platform)**
+
+Realtime data is refreshed automatically every hour via a **GitHub Actions workflow** (`.github/workflows/realtime_pipeline.yml`). The workflow fetches new ENTSO-E and Open-Meteo data, runs drift monitoring, and pushes the updated snapshot to HF Spaces — no manual intervention required.
+
+To manually refresh historical data for a specific year:
+
+```bash
+python main.py --steps ingest preprocess features --start-year 2026 --end-year 2026
+python upload_to_hf.py
+```
+
+> **Note on the FastAPI layer:** `api/main.py` is not deployed on HF Spaces. The dashboard reads Parquet files and the model directly from disk inside the container. The API remains in the repository as a portfolio artifact demonstrating REST serving knowledge.
+
+See `project_assumptions_and_sources.md §13` for full deployment details.
 
 ---
 
@@ -352,4 +374,4 @@ docker run -p 8000:8000 \
 
 ## Documentation
 
-Design decisions, data assumptions, known limitations, and source references are documented in [`docs/project_assumptions_and_sources.md`](docs/project_assumptions_and_sources.md).
+Design decisions, data assumptions, known limitations, and source references are documented in [`/project_assumptions_and_sources.md`](/project_assumptions_and_sources.md).

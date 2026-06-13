@@ -1,8 +1,6 @@
 name: Historical Pipeline (current year)
 
 on:
-  schedule:
-    - cron: "0 3 * * *" # every day at 3 AM UTC
   workflow_dispatch: # manual trigger
 
 jobs:

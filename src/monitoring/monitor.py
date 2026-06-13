@@ -188,7 +188,7 @@ def save_monitoring_report(summary: dict, raw_dict: dict, timestamp: datetime) -
 
 def log_drift_alerts(summary: dict) -> bool:
     """
-    Logs a [WARN] alert for each critical feature in drift.
+    Logs a [WARN] alert for each feature in drift.
     Returns True if at least one critical feature is in drift.
     """
     critical_in_drift = []
@@ -204,6 +204,14 @@ def log_drift_alerts(summary: dict) -> bool:
                 f"[WARN] Drift detected on critical feature '{feature}' "
                 f"(p_value={result['p_value']:.4f} < {DRIFT_THRESHOLD})"
             )
+
+    for feature, result in summary.items():
+        if feature in CRITICAL_FEATURES or not result["drift_detected"]:
+            continue
+        logger.warning(
+            f"[WARN] Drift detected on feature '{feature}' "
+            f"(p_value={result['p_value']:.4f} < {DRIFT_THRESHOLD})"
+        )
 
     if not critical_in_drift:
         logger.info("[PROCESS] No drift detected on critical features.")
